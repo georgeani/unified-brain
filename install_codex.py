@@ -73,13 +73,15 @@ def install(codex_home, excludes_path=None):
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill = skill_dir / "SKILL.md"
     source = BASE / "skills" / "unified-brain" / "SKILL.md"
-    if not skill.is_symlink() or skill.resolve() != source:
-        if skill.exists() or skill.is_symlink():
+    content = source.read_bytes()
+    if skill.is_symlink() or not skill.exists() or skill.read_bytes() != content:
+        if (skill.exists() or skill.is_symlink()) and not (skill.is_symlink() and skill.resolve() == source):
             backup = skill_dir / "SKILL.md.before-unified-brain-install"
             if not backup.exists():
                 backup.write_bytes(skill.read_bytes())
+        if skill.exists() or skill.is_symlink():
             skill.unlink()
-        skill.symlink_to(source)
+        skill.write_bytes(content)
     config.write_text(text)
     hooks_path.write_text(json.dumps(hooks, indent=2) + "\n")
     if excludes_path is not None:

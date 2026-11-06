@@ -243,12 +243,13 @@ from the unified-brain checkout using its virtual environment:
 .venv/bin/python install_codex.py
 ```
 
-The installer registers the MCP server, links the skill into your user-level
+The installer registers the MCP server, installs the skill into your user-level
 Codex skills directory, configures background session-start and post-tool
 hooks, and adds the database filenames to your Git user exclude file. Restart
 Codex and review and trust these hooks in `/hooks` (or Settings
 > Hooks in the desktop app). Codex requires this review before user hooks run.
 Existing Codex settings and hooks are preserved.
+Run the installer again after updating the bundled skill to refresh the user-level copy.
 
 In any Git checkout, Codex can use the globally available `$unified-brain`
 skill. The hooks create `<repo>/.unified-brain.db` when a session starts and

@@ -131,7 +131,9 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(len(hooks["SessionStart"]), 1)
             self.assertEqual(len(hooks["PostToolUse"]), 1)
             self.assertIn("Stop", hooks)
-            self.assertTrue((home / "skills/unified-brain/SKILL.md").is_symlink())
+            installed = home / "skills/unified-brain/SKILL.md"
+            self.assertFalse(installed.is_symlink())
+            self.assertEqual(installed.read_bytes(), (install_codex.BASE / "skills/unified-brain/SKILL.md").read_bytes())
             self.assertEqual(excludes.read_text().splitlines(), ["existing-rule", ".unified-brain.db",
                              ".unified-brain.db-shm", ".unified-brain.db-wal"])
 

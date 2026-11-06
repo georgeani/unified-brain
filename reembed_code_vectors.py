@@ -10,6 +10,7 @@ ends. By hand:
     python reembed_code_vectors.py --provider voyage [--dry-run]
         [--slab 200] [--workers 4] [--full] [--force]
     python reembed_code_vectors.py --provider qwen
+    python reembed_code_vectors.py --provider openrouter
 (--db /path/to/repo/.unified-brain.db or DB_PATH in .env; the store's key from .env)
 
 What it does per atomic skill (active and deleted):
@@ -53,7 +54,8 @@ import store
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 CHUNK_TARGET_CHARS = 16_000
-KEY_ENV = {"voyage": "VOYAGE_API_KEY", "qwen": "DEEPINFRA_API_KEY"}
+KEY_ENV = {"voyage": "VOYAGE_API_KEY", "qwen": "DEEPINFRA_API_KEY",
+           "openrouter": "OPENROUTER_API_KEY"}
 OPEN = skills_lib.CODE_VEC_OPEN
 ALIVE_SECONDS = 900
 
@@ -361,7 +363,7 @@ def main():
     dry = "--dry-run" in sys.argv
     provider = _arg("--provider")
     if provider not in KEY_ENV:
-        sys.exit("--provider voyage|qwen is required")
+        sys.exit("--provider voyage|qwen|openrouter is required")
 
     db = _arg("--db") or os.environ.get("DB_PATH", "")
     if not db:

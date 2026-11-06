@@ -46,7 +46,7 @@ POOL_SIZE = 8
 _BODY_PREFIXES = ("code:", "code_hist:", "code_at:")
 # Chunk-vector rows: <prefix>:<skill_id>:<version>:<chunk>. Mean rows
 # (<prefix>_mean:…) and version lists (<prefix>_ver:…) are plain records.
-_VEC_PREFIXES = ("cvec_at", "cvecq_at")
+_VEC_PREFIXES = ("cvec_at", "cvecq_at", "cveco_at")
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;

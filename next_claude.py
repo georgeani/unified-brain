@@ -16,8 +16,9 @@ When the commits are done, one embedding pass fills the code-vector store
     python next_claude.py /path/to/repo --embed-only    # only the embedding pass
     python next_claude.py /path/to/repo --db /elsewhere/x.db   # database file elsewhere
 
-Settings (.env): CODE_EMBED_PASS2 (voyage | qwen), VOYAGE_API_KEY /
-DEEPINFRA_API_KEY, CODE_EMBED_PASS2_WORKERS.
+Settings (.env): CODE_EMBED_PASS2 (voyage | qwen | openrouter),
+VOYAGE_API_KEY / DEEPINFRA_API_KEY / OPENROUTER_API_KEY,
+CODE_EMBED_PASS2_WORKERS.
 """
 import asyncio
 import json
@@ -30,13 +31,15 @@ from dotenv import load_dotenv
 
 import skills_lib
 import reembed_code_vectors
+import repository_identity
 import store
 from defkey_reconciler import DefKeyReconciler, FilePayload, FileSymbolEntry, HunkDelta
 from ingester import GitDiffIngester
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
-_CODE_EMBED_KEYS = {"voyage": "VOYAGE_API_KEY", "qwen": "DEEPINFRA_API_KEY"}
+_CODE_EMBED_KEYS = {"voyage": "VOYAGE_API_KEY", "qwen": "DEEPINFRA_API_KEY",
+                    "openrouter": "OPENROUTER_API_KEY"}
 
 
 def _db_clients(db_path: str) -> tuple:
@@ -273,6 +276,28 @@ async def ingest_repo(repo_path: str, *, since: str | None, max_n: int | None,
     ingester = GitDiffIngester(repo_path)
     reconciler = DefKeyReconciler(r, None, rb)
     commits = ingester.commit_range(since, max_n)
+    identity = repository_identity.checkout_identity(repo_path)
+    existing = repository_identity.index_identity(r)
+    complete_before = (existing["history_complete"] and existing["ingestion_status"] == "done"
+                       and bool(since) and since == existing["indexed_commit"]
+                       and repository_identity._git(repo_path, "merge-base", "--is-ancestor", since, "HEAD") is not None)
+    full_run = since is None and max_n is None and not identity.get("shallow", True)
+    if existing["repository"]:
+        check = repository_identity.compare(existing, identity)
+        if check["repository"] == "mismatch":
+            raise ValueError("The database belongs to a different Git history")
+        verified_source = check["repository"] == "matching_history"
+    else:
+        # A legacy index can only be attributed to this checkout if its last
+        # processed commit actually exists here. Never relabel an unknown DB.
+        previous = existing["indexed_commit"]
+        empty = not previous and not r.zrange("commit_order", 0, 0)
+        belongs = previous and repository_identity._git(repo_path, "cat-file", "-e", previous + "^{commit}") is not None
+        verified_source = bool(identity.get("available") and (empty or belongs))
+        if verified_source:
+            r.set("repository_identity", json.dumps({k: identity[k] for k in
+                  ("roots", "shallow", "remote_fingerprint")}))
+    r.set("index_history_complete", "0")
     print(f"\n🏗️  ingest {repo_path}: {len(commits)} commit(s)"
           + (f" after {since[:12]}" if since else "") + "\n")
     totals = {"commits": len(commits), "done": 0, "skipped": 0, "failed": 0,
@@ -312,6 +337,8 @@ async def ingest_repo(repo_path: str, *, since: str | None, max_n: int | None,
             print(f"── {i}/{len(commits)} commits")
     r.hset("ingest_run", mapping={"status": "failed" if totals["failed"] else "done",
                                   "current_commit": "", "finished_at": int(time.time())})
+    if not totals["failed"] and verified_source and (full_run or complete_before):
+        r.set("index_history_complete", "1")
     r.delete("ingest_run_alive")
     return totals
 
@@ -322,7 +349,7 @@ def embed_pass(r, rb) -> None:
     embs = _pass2_embedders()
     if not embs:
         print("⚠️  no code-vector store configured (CODE_EMBED_PASS2) — skipping embeddings")
-        return
+        raise RuntimeError("No code-vector store is configured; set CODE_EMBED_PASS2 and its API key")
     workers = int(os.environ.get("CODE_EMBED_PASS2_WORKERS", "4"))
     reembed_code_vectors.mark_waiting(r, [e.name for e in embs])
     for emb in embs:
@@ -331,6 +358,8 @@ def embed_pass(r, rb) -> None:
         print(f"   {total['versions']} versions of {total['skills']} skills: "
               f"{total['embedded']} embedded, {total['kept']} already stored, "
               f"{total['failed']} failed batch(es)")
+        if total["failed"]:
+            raise RuntimeError(f"Embedding failed for {total['failed']} batch(es) using {emb.name}")
 
 
 def _arg(name: str, default=None):
@@ -366,6 +395,8 @@ def main() -> None:
               f"{totals['failed']} failed; skills created={totals['created']} "
               f"updated={totals['updated']} obsoleted={totals['obsoleted']} "
               f"in {time.time() - t0:.0f}s")
+        if totals["failed"]:
+            raise RuntimeError("Ingestion had failed commits; the index is incomplete")
         r.optimize()                      # merge the text index after the writes
     if "--no-embed" not in sys.argv:
         embed_pass(r, rb)

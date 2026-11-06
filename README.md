@@ -107,10 +107,11 @@ No LLM is used during ingestion. One embedding pass runs at the end.
 ## Requirements
 
 - Python 3.11 or newer (SQLite comes with it; nothing else to install or run)
-- API keys: [OpenRouter](https://openrouter.ai) (Jev), one embedding provider —
-  [Voyage AI](https://www.voyageai.com) or [DeepInfra](https://deepinfra.com)
-  (Qwen3-Embedding-8B, cheaper) — and one writer provider ([Fireworks](https://fireworks.ai)
-  for DeepSeek, or Anthropic).
+- API keys: [OpenRouter](https://openrouter.ai) for Jev, and an embedding
+  provider: OpenRouter, [Voyage AI](https://www.voyageai.com), or
+  [DeepInfra](https://deepinfra.com). The web question and report pages also
+  need a writer provider ([Fireworks](https://fireworks.ai) for DeepSeek, or
+  Anthropic); an MCP client such as Codex can write its own answers.
 
 ## Quick start
 
@@ -144,6 +145,19 @@ CODE_EMBED_PASS2=qwen
 QA_VECTOR_STORE=qwen
 DEEPINFRA_API_KEY=...
 ```
+
+To use the same OpenRouter account for Jev and Qwen embeddings, set
+`OPENROUTER_API_KEY` and use these settings instead of the Qwen/DeepInfra
+settings above:
+
+```dotenv
+CODE_EMBED_PASS2=openrouter
+QA_VECTOR_STORE=openrouter
+```
+
+This sends code to OpenRouter for embeddings and Jev decisions. For the MCP
+retrieval workflow, Codex is the writer, so no separate writer key is needed.
+The web question and report pages still require a writer provider.
 
 ### 2. See what will be indexed
 
@@ -210,124 +224,105 @@ python next_claude.py ~/code/xz --embed-only
 # add or redo one provider's vectors on an existing database:
 python reembed_code_vectors.py --provider voyage --db ~/code/xz/.unified-brain.db
 python reembed_code_vectors.py --provider qwen   --db ~/code/xz/.unified-brain.db
+python reembed_code_vectors.py --provider openrouter --db ~/code/xz/.unified-brain.db
 ```
 
-Both providers can live in the same database; `QA_VECTOR_STORE` picks the one
+All three stores can live in the same database; `QA_VECTOR_STORE` picks the one
 questions use. Cost to expect: open62541's 277,080 body versions cost about
 $1.30 with Qwen on DeepInfra. Add `--dry-run` to count without embedding.
+OpenRouter uses a separate vector store: when switching an existing index,
+run the `--provider openrouter` command above before selecting it for queries.
 
 
-### 5. Start the service
+### 5. Set up automatic Codex indexing
 
-`DB_PATH` in `.env` must point at the database you want to ask about — one
-service, one repository. Then:
-
-```bash
-python codebase_qa_service.py
-```
-
-Open http://127.0.0.1:8000 to ask questions and http://127.0.0.1:8000/timeline
-for the commit timeline and reports. The server listens on localhost only.
-Each answer ends with a line of numbers: time per phase, Jev cost, writer speed.
-Ctrl+C stops it.
-
-To switch repositories, stop the service, change `DB_PATH`, start it again.
-
-### 6. Give it to your coding agent (Codex, Cursor, Claude Code, any MCP client)
-
-`unified_brain_mcp.py` is an MCP server with one tool, `retrieve`: the agent
-hands over the question, gets back the evidence — every body that answers it,
-with file, symbol and line — and writes the answer from it. It talks to the
-running service, so step 5 must be running. The service searches the one
-database selected by `DB_PATH`, regardless of which directory the agent is in.
-
-#### Codex
-
-Keep the unified-brain checkout in a stable location, separate from the
-repositories you want to work on. Codex launches its MCP server from this
-checkout, while the service reads the target repository's database. The
-`retrieve` tool supplies evidence to Codex; Codex writes the answer or makes
-the requested code changes. In this mode the service still needs an embedding
-provider and Jev's OpenRouter key, but a separate writer key is not required
-for the normal MCP retrieval path.
-
-After completing steps 1–5, add this to `~/.codex/config.toml` (or
-`$CODEX_HOME/config.toml` if you set `CODEX_HOME`). Replace both paths with
-absolute paths to your unified-brain checkout:
-
-```toml
-[mcp_servers.unified-brain]
-command = "/path/to/unified-brain/.venv/bin/python"
-args = ["/path/to/unified-brain/unified_brain_mcp.py"]
-tool_timeout_sec = 180
-
-[mcp_servers.unified-brain.env]
-UNIFIED_BRAIN_URL = "http://127.0.0.1:8000"
-```
-
-The timeout allows for retrieval that takes longer than Codex's default.
-The MCP process connects to the separately running service; registering it
-does not start the service or build an index. If you change the service port,
-change `UNIFIED_BRAIN_URL` to match.
-
-Optionally install the included skill so Codex can discover instructions for
-building and using an index across projects. If a skill with that name already
-exists, inspect it before installing. From the unified-brain checkout:
+With the requirements installed and embedding settings configured, run once
+from the unified-brain checkout using its virtual environment:
 
 ```bash
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-cp -R skills/unified-brain "${CODEX_HOME:-$HOME/.codex}/skills/"
+.venv/bin/python install_codex.py
 ```
 
-The skill provides instructions; it does not install dependencies, start the
-service, or configure credentials. Restart Codex after adding the server or
-skill. Run `codex mcp list` to check the configuration, and use `/mcp` in a
-Codex session to check the active connection. Open Codex in the target
-repository and ask, for example: “Use unified-brain to trace how requests are
-handled in this repository.” You can also invoke the skill as
-`$unified-brain`.
+The installer registers the MCP server, links the skill into your user-level
+Codex skills directory, configures background session-start and post-tool
+hooks, and adds the database filenames to your Git user exclude file. Restart
+Codex and review and trust these hooks in `/hooks` (or Settings
+> Hooks in the desktop app). Codex requires this review before user hooks run.
+Existing Codex settings and hooks are preserved.
 
-#### Switching repositories in Codex
+In any Git checkout, Codex can use the globally available `$unified-brain`
+skill. The hooks create `<repo>/.unified-brain.db` when a session starts and
+check it after shell commands, including commits. The MCP `retrieve` tool also
+checks and updates the index before every search, so a background update does
+not need to finish first. It starts a local service for each target repository;
+there is no need to switch `DB_PATH` or restart a service when changing repos.
+When the MCP process runs outside the target checkout, the agent supplies the
+checkout through `repo_path`. The `sync` MCP tool and `python auto_sync.py
+/path/to/repo` provide an explicit way to create or refresh an index.
 
-Suppose unified-brain is installed at `~/code/unified-brain` and you want to
-work on `~/code/project-b`. The MCP configuration continues to point to the
-unified-brain checkout; it does not need to be copied into `project-b`.
+The first indexing pass can take substantial time. Indexing sends code to the
+configured embedding provider; subsequent commits trigger incremental updates
+and embeddings, and searches use the configured judge. These calls may incur
+charges. `CODE_EMBED_PASS2` must include the same provider as `QA_VECTOR_STORE`,
+and its credentials and `OPENROUTER_API_KEY` must be configured in `.env`.
+If an update fails, or the checkout has diverged from the index, the existing
+index is left intact and the error is reported. An embedding checkpoint makes
+an interrupted embedding pass retry on the next synchronization.
 
-1. From the unified-brain checkout, build project B's index with the existing
-   virtual environment:
+The result includes `index` and `repository_check`. Different root histories
+stop retrieval; differing origins or revisions, incomplete ingestion, shallow
+history, and uncommitted tracked changes produce warnings. A shared history
+alone does not prove two checkouts are the same fork. Legacy indexes without
+identity metadata are only associated with a checkout when their last recorded
+commit belongs to it. Untracked files and uncommitted changes are not indexed.
+Git's user exclude rules do not hide database files that are already tracked.
 
-   ```bash
-   cd ~/code/unified-brain
-   .venv/bin/python next_claude.py ~/code/project-b
-   ```
+### 6. Use a standalone service (optional)
 
-   This writes `~/code/project-b/.unified-brain.db` and runs the embedding
-   pass. Ingestion can take time, and external embedding and retrieval calls
-   can incur provider charges. `--resume` continues after the last ingested
-   commit; indexing is not an automatic, continuous sync.
+For the web UI or direct HTTP use, set `DB_PATH` to an existing repository
+database and start `python codebase_qa_service.py`. Open
+http://127.0.0.1:8000 for questions or `/timeline` for reports. This standalone
+service uses a single database and must be restarted if `DB_PATH` changes.
+`GET /api/repository` reports the active index; `POST /api/retrieve` accepts
+an optional checkout identity and returns the comparison.
 
-2. Stop the existing service, if running. Set `DB_PATH` in unified-brain's
-   `.env` to the absolute path of project B's database and start the service
-   again. Alternatively, override `DB_PATH` for this service process:
+To run without Codex, configure `DB_PATH`, `PORT`, embedding and model keys in
+`.env` (see `env.example`), then run `python next_claude.py /path/to/repo`
+followed by `python codebase_qa_service.py`. The web UI needs the writer
+settings `LLM_PROVIDER` and `LLM_API_KEY` in addition to the embedding and
+OpenRouter settings. No Codex installation or hooks are required.
 
-   ```bash
-   cd ~/code/unified-brain
-   DB_PATH="$HOME/code/project-b/.unified-brain.db" .venv/bin/python codebase_qa_service.py
-   ```
+For an already-running external service, set `UNIFIED_BRAIN_MODE=external` and
+`UNIFIED_BRAIN_URL` in the MCP environment. External mode does not automatically
+create or update indexes. The default `auto` mode starts per-repository local
+services and requires the MCP process to have access to the checkout.
 
-   Leave it running. `curl http://127.0.0.1:8000/health` shows the database
-   path the service opened. Check it before using the tool: changing Codex's
-   working directory alone does not switch the database.
+#### Branches and worktrees
 
-3. Open Codex in `~/code/project-b` and ask it to use unified-brain. The
-   installed skill and global MCP configuration remain available. To return
-   to project A, stop the service and start it with project A's `DB_PATH`.
+The ingester walks commits reachable from the target checkout's `HEAD`. A
+database has one ingestion sequence and one current view; it does not
+automatically switch views when you check out another branch. The history walk
+can include merged branches, but the current implementation orders commits by
+ingestion rather than maintaining independent branch-aware snapshots. Do not
+assume historical queries accurately reconstruct every divergent branch.
 
-The index represents ingested Git history, not necessarily the current
-working tree or uncommitted changes. Refresh it when appropriate and check the
-current files before relying on evidence for an edit. A local service must be
-reachable from the environment running the MCP server; a remote or isolated
-Codex environment cannot automatically reach your machine's `127.0.0.1`.
+For work on separate branches, use a separate Git worktree and database for
+each branch. For example, create a worktree for an existing `feature` branch
+from the main repository, then index it:
+
+```bash
+git -C ~/code/project-b worktree add ~/code/project-b-feature feature
+cd ~/code/unified-brain
+.venv/bin/python next_claude.py ~/code/project-b-feature
+```
+
+Open Codex in that worktree; the automatic workflow uses its own database.
+A worktree separates the databases but does not make historical retrieval
+branch-aware.
+Changes not committed to Git are not ingested. Confirm relevant results
+against the worktree, especially after branch changes, merges, or rebases.
+Do not use `--resume` across diverged or rewritten histories: its saved
+resume point and the index's ordering are not branch-specific.
 
 #### Cursor and Claude Code
 
@@ -337,8 +332,7 @@ Cursor — `.cursor/mcp.json` in the project you are working on (Cursor settings
 ```json
 {"mcpServers": {"unified-brain": {
   "command": "/path/to/unified-brain/.venv/bin/python",
-  "args": ["/path/to/unified-brain/unified_brain_mcp.py"],
-  "env": {"UNIFIED_BRAIN_URL": "http://127.0.0.1:8000"}}}}
+  "args": ["/path/to/unified-brain/unified_brain_mcp.py"]}}}
 ```
 
 Claude Code — the same object in `.mcp.json`. The tool takes 20–60 seconds

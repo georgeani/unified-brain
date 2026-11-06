@@ -9,6 +9,7 @@ the timeline on GET /timeline, and the report/probe API under /api/timeline.
 import json
 import os
 import store
+import repository_identity
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -113,8 +114,8 @@ def _guard_line(skill: dict) -> str:
 #   LLM_MODEL           optional, overrides the provider's default model
 #   LLM_API_BASE        optional, overrides the provider's default endpoint
 #   OPENROUTER_API_KEY  Jev (evidence gathering)
-#   QA_VECTOR_STORE     voyage | qwen — the code-vector store that pre-filters for Jev
-#   VOYAGE_API_KEY / DEEPINFRA_API_KEY   key of that store
+#   QA_VECTOR_STORE     voyage | qwen | openrouter — the code-vector store for Jev
+#   VOYAGE_API_KEY / DEEPINFRA_API_KEY / OPENROUTER_API_KEY   key of that store
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.getcwd(), store.DB_FILE_NAME))
 
 _redis_text   = store.open(DB_PATH)
@@ -155,7 +156,8 @@ _VECTOR_STORE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "vector_store", default=QA_VECTOR_STORE_DEFAULT)
 
 CODE_EMBEDDERS: dict = {}
-for _n, _k in (("voyage", "VOYAGE_API_KEY"), ("qwen", "DEEPINFRA_API_KEY")):
+for _n, _k in (("voyage", "VOYAGE_API_KEY"), ("qwen", "DEEPINFRA_API_KEY"),
+               ("openrouter", "OPENROUTER_API_KEY")):
     _e = skills_lib.make_code_embedder(_n, os.getenv(_k, ""))
     if _e is not None:
         CODE_EMBEDDERS[_n] = _e
@@ -2263,7 +2265,7 @@ class AskRequest(BaseModel):
     history: list[dict] = []  # [{"role": "user"|"assistant", "content": str}]
     from_commit: str = ""       # historical QA: window the conversation to a commit range
     to_commit:   str = ""
-    vector_store: Literal["", "voyage", "qwen"] = ""   # "" = env default; the code-vector store that pre-filters for Jev
+    vector_store: Literal["", "voyage", "qwen", "openrouter"] = ""   # "" = env default
 
 
 
@@ -5349,6 +5351,7 @@ class RetrieveRequest(BaseModel):
     question: str
     from_commit: str = ""     # optional window: both set → evidence as of to_commit
     to_commit: str = ""
+    checkout: Optional[dict] = None  # identity supplied by clients that know their workspace
 
 
 # One retrieval at a time: a second call waits for the first instead of
@@ -5391,6 +5394,12 @@ def _snippet(body: str, pattern: str, is_regex: bool, first_line: int, around: i
     return {"hit_line": None, "snippet": ""}
 
 
+@app.get("/api/repository")
+async def api_repository():
+    """Describe the index actually opened by this service."""
+    return await asyncio.to_thread(repository_identity.index_identity, _redis_text)
+
+
 @app.post("/api/retrieve")
 async def api_retrieve(req: RetrieveRequest):
     """The question page's retrieval without the answer: embeddings →
@@ -5400,6 +5409,10 @@ async def api_retrieve(req: RetrieveRequest):
     if not os.environ.get("OPENROUTER_API_KEY"):
         raise HTTPException(400, "OPENROUTER_API_KEY is not set (Jev gathers the evidence)")
     org_redis, org_redis_binary = _redis_clients()
+    index = await asyncio.to_thread(repository_identity.index_identity, org_redis)
+    check = repository_identity.compare(index, req.checkout) if req.checkout is not None else None
+    if check and check["repository"] == "mismatch":
+        raise HTTPException(409, {"repository_check": check, "index": index})
     as_of, window = None, ""
     if req.from_commit and req.to_commit:
         as_of = await asyncio.to_thread(_resolve_window, org_redis, req.from_commit, req.to_commit)
@@ -5423,8 +5436,18 @@ async def api_retrieve(req: RetrieveRequest):
     chars = sum(len(s.get("code") or "") for s in result["skills"])
     print(f"📦 retrieve: {len(result['skills'])} bodies, {chars} chars "
           f"(~{chars // 4} tokens) handed over in {time.time() - t0:.1f}s")
+    after = await asyncio.to_thread(repository_identity.index_identity, org_redis)
+    if after != index:
+        if check is None:
+            check = {"repository": "unknown", "revision": "unknown", "warnings": []}
+        check["revision"] = "unknown"
+        check["warnings"].append("Index metadata changed during retrieval; the evidence may span different index states.")
+        if req.checkout is not None and repository_identity.compare(after, req.checkout)["repository"] == "mismatch":
+            raise HTTPException(409, {"repository_check": repository_identity.compare(after, req.checkout), "index": after})
     return {
         "question": req.question,
+        "index": index,
+        "repository_check": check,
         "window": window,
         "evidence": [_evidence_row(s) for s in result["skills"]],
         "leads": [{"file": l["file"], "symbol": l["symbol"], "trail": l["trail"]}

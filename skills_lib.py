@@ -62,10 +62,13 @@ CODE_EMBED_SPECS = {
                "prefix": "cvec_at",  "index": "code_semantic_at"},
     "qwen":   {"model": "Qwen/Qwen3-Embedding-8B", "dims": 4096,
                "prefix": "cvecq_at", "index": "code_semantic_qwen_at"},
+    "openrouter": {"model": "qwen/qwen3-embedding-8b", "dims": 4096,
+                   "prefix": "cveco_at", "index": "code_semantic_openrouter_at"},
 }
 # to_rank of a version that no later commit has replaced or deleted.
 CODE_VEC_OPEN = 2_000_000_000
 DEEPINFRA_OPENAI_BASE = "https://api.deepinfra.com/v1/openai"
+OPENROUTER_OPENAI_BASE = "https://openrouter.ai/api/v1"
 # Qwen3-Embedding has no input_type: the QUERY side carries an instruction
 # prefix, the document side none. (Same string on every query — it is
 # part of the model's contract, not a prompt to tune per call.)
@@ -171,6 +174,15 @@ class CodeEmbedder:
         if input_type == "query":
             batch = [QWEN_QUERY_INSTRUCT + t for t in batch]
         resp = _embed_with_retry(self.client, batch, model=self.model)
+        if self.name == "openrouter":
+            # A malformed or partial batch must never be paired with the wrong
+            # code bodies, even when the provider returns entries out of order.
+            rows = sorted(resp.data, key=lambda row: row.index)
+            if [row.index for row in rows] != list(range(len(batch))):
+                raise ValueError("OpenRouter returned an incomplete embedding batch")
+            if any(len(row.embedding) != self.dims for row in rows):
+                raise ValueError(f"OpenRouter embeddings must have {self.dims} dimensions")
+            return [row.embedding for row in rows]
         return [d.embedding for d in resp.data]
 
     def embed(self, texts: list[str], input_type: str) -> list[bytes]:
@@ -188,7 +200,7 @@ class CodeEmbedder:
                     out.append(struct.pack(f"{len(v)}f", *v))
             batch, chars = [], 0
         for t in texts:
-            if batch and (len(batch) >= CODE_EMBED_MAX_ITEMS
+            if batch and (len(batch) >= (16 if self.name == "openrouter" else CODE_EMBED_MAX_ITEMS)
                           or chars + len(t) > CODE_EMBED_MAX_CHARS):
                 _flush()
             batch.append(t)
@@ -207,6 +219,9 @@ def make_code_embedder(name: str, api_key: str) -> Optional["CodeEmbedder"]:
     if name == "qwen":
         return CodeEmbedder(name, OpenAI(api_key=api_key,
                                          base_url=DEEPINFRA_OPENAI_BASE))
+    if name == "openrouter":
+        return CodeEmbedder(name, OpenAI(api_key=api_key,
+                                         base_url=OPENROUTER_OPENAI_BASE))
     raise ValueError(f"unknown code embedder {name!r}")
 
 

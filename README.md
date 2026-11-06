@@ -253,7 +253,12 @@ Run the installer again after updating the bundled skill to refresh the user-lev
 
 In any Git checkout, Codex can use the globally available `$unified-brain`
 skill. The hooks create `<repo>/.unified-brain.db` when a session starts and
-check it after shell commands, including commits. The MCP `retrieve` tool also
+check it after shell commands, including commits. A session-scoped background
+watcher checks the session checkout every five seconds and updates its index
+when commits are made in another terminal or editor. Codex stops the watcher
+when the session ends; a new or resumed session starts it again. The watcher
+retries failed updates every 30 seconds, and has a maximum lifetime of 30 days
+per session. It indexes committed changes only. The MCP `retrieve` tool also
 checks and updates the index before every search, so a background update does
 not need to finish first. It starts a local service for each target repository;
 there is no need to switch `DB_PATH` or restart a service when changing repos.

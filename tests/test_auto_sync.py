@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import auto_sync
+import auto_watch
 import codex_hook
 import install_codex
 import repository_identity
@@ -111,6 +112,37 @@ class SyncTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_watcher_detects_external_commits_and_retries_failures(self):
+        synced = []
+        now = [0]
+        attempts = [0]
+
+        def synchronize(root):
+            attempts[0] += 1
+            if attempts[0] == 2:
+                raise RuntimeError("temporary failure")
+            head = self.git("rev-parse", "HEAD")
+            synced.append(head)
+            return {"index": {"indexed_commit": head}}
+
+        def tick(seconds):
+            now[0] += seconds
+            if now[0] == 5:
+                (self.repo / "file.py").write_text("a = 2\n")
+                self.git("add", "file.py")
+                self.git("commit", "-qm", "external commit")
+            if now[0] > 40:
+                raise StopIteration
+
+        with patch.object(auto_sync, "sync_repo", side_effect=synchronize), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(StopIteration):
+                auto_watch.watch(self.repo, sleep=tick, clock=lambda: now[0])
+        self.assertEqual(len(synced), 2)
+        self.assertNotEqual(synced[0], synced[1])
+        self.assertEqual(synced[1], self.git("rev-parse", "HEAD"))
+        self.assertEqual(attempts[0], 3)
+
 
 class InstallerTests(unittest.TestCase):
     def test_install_preserves_other_config_and_is_idempotent(self):
@@ -128,8 +160,11 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(config["mcp_servers"]["unified-brain"]["tool_timeout_sec"], 1800)
             self.assertEqual(config["mcp_servers"]["unified-brain"]["env"]["UNIFIED_BRAIN_MODE"], "auto")
             hooks = json.loads((home / "hooks.json").read_text())["hooks"]
-            self.assertEqual(len(hooks["SessionStart"]), 1)
+            self.assertEqual(len(hooks["SessionStart"]), 2)
             self.assertEqual(len(hooks["PostToolUse"]), 1)
+            watcher = next(group["hooks"][0] for group in hooks["SessionStart"]
+                           if "auto_watch.py" in group["hooks"][0]["command"])
+            self.assertTrue(watcher["async"])
             self.assertIn("Stop", hooks)
             installed = home / "skills/unified-brain/SKILL.md"
             self.assertFalse(installed.is_symlink())

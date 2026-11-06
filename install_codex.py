@@ -69,6 +69,15 @@ def install(codex_home, excludes_path=None):
         if not any(any(h.get("command") == command for h in group.get("hooks", [])) for group in groups):
             groups.append({"matcher": matcher, "hooks": [handler]})
 
+    # This background hook lives for the session and catches commits made by
+    # other processes. Codex cancels it at session end.
+    watch_command = shlex.join([sys.executable, str(BASE / "auto_watch.py")])
+    groups = hook_map.setdefault("SessionStart", [])
+    if not any(any(h.get("command") == watch_command for h in group.get("hooks", [])) for group in groups):
+        groups.append({"matcher": "startup|resume", "hooks": [{
+            "type": "command", "command": watch_command, "async": True,
+            "timeout": 2592000, "statusMessage": "Watching for repository commits"}]})
+
     skill_dir = codex_home / "skills" / "unified-brain"
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill = skill_dir / "SKILL.md"

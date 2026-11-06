@@ -233,13 +233,103 @@ Ctrl+C stops it.
 
 To switch repositories, stop the service, change `DB_PATH`, start it again.
 
-### 6. Give it to your coding agent (Cursor, Claude Code, any MCP client)
+### 6. Give it to your coding agent (Codex, Cursor, Claude Code, any MCP client)
 
 `unified_brain_mcp.py` is an MCP server with one tool, `retrieve`: the agent
 hands over the question, gets back the evidence — every body that answers it,
 with file, symbol and line — and writes the answer from it. It talks to the
-running service, so step 5 must be running; when the service is stopped the
-agent works without it and says so.
+running service, so step 5 must be running. The service searches the one
+database selected by `DB_PATH`, regardless of which directory the agent is in.
+
+#### Codex
+
+Keep the unified-brain checkout in a stable location, separate from the
+repositories you want to work on. Codex launches its MCP server from this
+checkout, while the service reads the target repository's database. The
+`retrieve` tool supplies evidence to Codex; Codex writes the answer or makes
+the requested code changes. In this mode the service still needs an embedding
+provider and Jev's OpenRouter key, but a separate writer key is not required
+for the normal MCP retrieval path.
+
+After completing steps 1–5, add this to `~/.codex/config.toml` (or
+`$CODEX_HOME/config.toml` if you set `CODEX_HOME`). Replace both paths with
+absolute paths to your unified-brain checkout:
+
+```toml
+[mcp_servers.unified-brain]
+command = "/path/to/unified-brain/.venv/bin/python"
+args = ["/path/to/unified-brain/unified_brain_mcp.py"]
+tool_timeout_sec = 180
+
+[mcp_servers.unified-brain.env]
+UNIFIED_BRAIN_URL = "http://127.0.0.1:8000"
+```
+
+The timeout allows for retrieval that takes longer than Codex's default.
+The MCP process connects to the separately running service; registering it
+does not start the service or build an index. If you change the service port,
+change `UNIFIED_BRAIN_URL` to match.
+
+Optionally install the included skill so Codex can discover instructions for
+building and using an index across projects. If a skill with that name already
+exists, inspect it before installing. From the unified-brain checkout:
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R skills/unified-brain "${CODEX_HOME:-$HOME/.codex}/skills/"
+```
+
+The skill provides instructions; it does not install dependencies, start the
+service, or configure credentials. Restart Codex after adding the server or
+skill. Run `codex mcp list` to check the configuration, and use `/mcp` in a
+Codex session to check the active connection. Open Codex in the target
+repository and ask, for example: “Use unified-brain to trace how requests are
+handled in this repository.” You can also invoke the skill as
+`$unified-brain`.
+
+#### Switching repositories in Codex
+
+Suppose unified-brain is installed at `~/code/unified-brain` and you want to
+work on `~/code/project-b`. The MCP configuration continues to point to the
+unified-brain checkout; it does not need to be copied into `project-b`.
+
+1. From the unified-brain checkout, build project B's index with the existing
+   virtual environment:
+
+   ```bash
+   cd ~/code/unified-brain
+   .venv/bin/python next_claude.py ~/code/project-b
+   ```
+
+   This writes `~/code/project-b/.unified-brain.db` and runs the embedding
+   pass. Ingestion can take time, and external embedding and retrieval calls
+   can incur provider charges. `--resume` continues after the last ingested
+   commit; indexing is not an automatic, continuous sync.
+
+2. Stop the existing service, if running. Set `DB_PATH` in unified-brain's
+   `.env` to the absolute path of project B's database and start the service
+   again. Alternatively, override `DB_PATH` for this service process:
+
+   ```bash
+   cd ~/code/unified-brain
+   DB_PATH="$HOME/code/project-b/.unified-brain.db" .venv/bin/python codebase_qa_service.py
+   ```
+
+   Leave it running. `curl http://127.0.0.1:8000/health` shows the database
+   path the service opened. Check it before using the tool: changing Codex's
+   working directory alone does not switch the database.
+
+3. Open Codex in `~/code/project-b` and ask it to use unified-brain. The
+   installed skill and global MCP configuration remain available. To return
+   to project A, stop the service and start it with project A's `DB_PATH`.
+
+The index represents ingested Git history, not necessarily the current
+working tree or uncommitted changes. Refresh it when appropriate and check the
+current files before relying on evidence for an edit. A local service must be
+reachable from the environment running the MCP server; a remote or isolated
+Codex environment cannot automatically reach your machine's `127.0.0.1`.
+
+#### Cursor and Claude Code
 
 Cursor — `.cursor/mcp.json` in the project you are working on (Cursor settings
 → Customize → MCP shows it; use Agent mode):

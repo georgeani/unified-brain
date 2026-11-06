@@ -100,6 +100,12 @@ class SyncTests(unittest.TestCase):
             auto_watch.main()
         watch.assert_called_once_with(str(self.repo))
 
+    def test_watcher_ignores_non_git_directory(self):
+        with patch("sys.stdin", io.StringIO(json.dumps({"cwd": self.tmp.name}))), \
+             patch.object(auto_watch, "watch") as watch:
+            auto_watch.main()
+        watch.assert_not_called()
+
     def test_real_ingester_tracks_new_commits(self):
         real_ingest = auto_sync._ingest
         def ingest_without_external_embedding(root, *flags):
